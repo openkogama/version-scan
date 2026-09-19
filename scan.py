@@ -1,8 +1,10 @@
 import argparse
 import hashlib
+import io
 import json
 import os
 import re
+import struct
 import tempfile
 import urllib.request
 import zipfile
@@ -14,8 +16,10 @@ PREFAB = re.compile(
     rb"(?s)(.{4})(.{4})(.{4})(.{4})\x24\x00\x00\x00[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 )
 NUMBER = re.compile(rb"[0-9]{1,4}(?:\.[0-9]{1,4}){1,3}")
+ENGINE = re.compile(rb"[0-9]{1,4}\.[0-9]+\.[0-9]+[a-z][0-9]+")
 ASSETS = ("resources.assets", "sharedassets0.assets", "globalgamemanagers.assets", "level0", "mainData")
 SETTINGS = ("globalgamemanagers", "mainData")
+BUNDLE = "data.unity3d"
 
 
 def packages():
@@ -52,6 +56,61 @@ def fetch(url, path):
     raise RuntimeError(err)
 
 
+def lz4(src, size):
+    out = bytearray()
+    i = 0
+    while i < len(src) and len(out) < size:
+        token = src[i]
+        i += 1
+        n = token >> 4
+        if n == 15:
+            while src[i] == 255:
+                n += 255
+                i += 1
+            n += src[i]
+            i += 1
+        out += src[i : i + n]
+        i += n
+        if i >= len(src):
+            break
+        off = src[i] | (src[i + 1] << 8)
+        i += 2
+        n = token & 15
+        if n == 15:
+            while src[i] == 255:
+                n += 255
+                i += 1
+            n += src[i]
+            i += 1
+        start = len(out) - off
+        for k in range(n + 4):
+            out.append(out[start + k])
+    return bytes(out)
+
+
+def unpack_bundle(data):
+    f = io.BytesIO(data)
+    f.read(8)
+    version = struct.unpack(">I", f.read(4))[0]
+    engine = b"".join(iter(lambda: f.read(1), b"\0"))
+    revision = b"".join(iter(lambda: f.read(1), b"\0")).decode()
+    _, comp, uncomp, flags = struct.unpack(">qIII", f.read(20))
+    if version >= 7:
+        f.seek((f.tell() + 15) & ~15)
+    raw = f.read(comp)
+    info = lz4(raw, uncomp) if flags & 0x3F in (2, 3) else raw
+    if flags & 0x200:
+        f.seek((f.tell() + 15) & ~15)
+    out = bytearray()
+    pos = 20
+    for _ in range(struct.unpack(">i", info[16:20])[0]):
+        u, c, bf = struct.unpack(">IIH", info[pos : pos + 10])
+        pos += 10
+        chunk = f.read(c)
+        out += lz4(chunk, u) if bf & 0x3F in (2, 3) else chunk
+    return revision, bytes(out)
+
+
 def prefab_version(data):
     for m in PREFAB.finditer(data):
         n = [int.from_bytes(m.group(i), "little") for i in range(1, 5)]
@@ -63,9 +122,14 @@ def prefab_version(data):
 def bundle_version(data):
     head = NUMBER.search(data[:64])
     engine = head.group() if head else b""
-    found = [m.group().decode() for m in NUMBER.finditer(data[64:]) if m.group() != engine]
+    found = [m.group().decode() for m in NUMBER.finditer(data) if m.group() != engine]
     found = [v for v in found if v != "1.0"]
     return next((v for v in found if v.count(".") >= 2), found[0] if found else None)
+
+
+def unity_version(data):
+    m = ENGINE.search(data[:256])
+    return m.group().decode() if m else None
 
 
 def entry(names, wanted):
@@ -76,13 +140,25 @@ def inspect(path):
     with zipfile.ZipFile(path) as z:
         names = z.namelist()
         unpacked = sum(i.file_size for i in z.infolist())
+        engine = None
+
         for name, reader in [(f, prefab_version) for f in ASSETS] + [(f, bundle_version) for f in SETTINGS]:
             found = entry(names, name)
             if found:
-                version = reader(z.read(found))
+                data = z.read(found)
+                engine = engine or unity_version(data)
+                version = reader(data)
                 if version:
-                    return unpacked, version, name
-    return unpacked, None, None
+                    return unpacked, version, engine, name
+
+        found = entry(names, BUNDLE)
+        if found:
+            engine, data = unpack_bundle(z.read(found))
+            version = bundle_version(data[: 1 << 20])
+            if version:
+                return unpacked, version, engine, BUNDLE
+
+    return unpacked, None, engine, None
 
 
 def main():
@@ -103,7 +179,7 @@ def main():
         os.close(fd)
         try:
             sha, zip_size = fetch(pkg["url"], zip_path)
-            unpacked, version, source = inspect(zip_path)
+            unpacked, version, engine, source = inspect(zip_path)
         except Exception as e:
             print(f"  failed: {e}", flush=True)
             results.append({**pkg, "error": str(e)})
@@ -111,11 +187,12 @@ def main():
         finally:
             os.unlink(zip_path)
 
-        print(f"  {version or 'no version'} ({source or '-'})", flush=True)
+        print(f"  {version or 'no version'} on unity {engine or '?'} ({source or '-'})", flush=True)
         results.append(
             {
                 "id": pkg["id"],
                 "version": version or "",
+                "unityVersion": engine or "",
                 "timestamp": pkg["timestamp"],
                 "il2cpp": pkg["il2cpp"],
                 "zipSize": zip_size,
