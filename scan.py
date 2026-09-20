@@ -198,7 +198,7 @@ def main():
                 "zipSize": zip_size,
                 "unpackedSize": unpacked,
                 "sha256": sha,
-                "url": pkg["url"],
+                "urls": [pkg["url"]],
             }
         )
 

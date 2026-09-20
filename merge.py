@@ -9,7 +9,7 @@ failed = [e for e in entries if "error" in e]
 done = sorted((e for e in entries if "error" not in e), key=lambda e: e["timestamp"], reverse=True)
 
 with open("versions.json", "w", encoding="utf-8") as f:
-    json.dump({"versions": done}, f, indent=4)
+    json.dump({"schema": 2, "versions": done}, f, indent=4)
     f.write("\n")
 
 print(f"{len(done)} packages, {sum(1 for e in done if not e['version'])} without version, {len(failed)} failed")
