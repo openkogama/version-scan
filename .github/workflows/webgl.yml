@@ -1,0 +1,62 @@
+name: webgl
+
+on:
+  workflow_dispatch:
+    inputs:
+      upload:
+        description: "push the packages to r2 (uncheck for a dry run)"
+        type: boolean
+        default: true
+      limit:
+        description: "only the first N builds per shard (0 = all)"
+        type: string
+        default: "0"
+
+env:
+  R2_ACCOUNT_ID: f1b5019a1d5ee73f9494a30464733335
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install boto3 brotli
+      - env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          python webgl.py --shard ${{ matrix.shard }} --shards 16 \
+            --limit ${{ inputs.limit }} \
+            ${{ inputs.upload && '--upload' || '' }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: webgl-${{ matrix.shard }}
+          path: out/webgl-${{ matrix.shard }}.json
+
+  merge:
+    runs-on: ubuntu-latest
+    needs: package
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          path: shards
+          pattern: webgl-*
+          merge-multiple: true
+      # versions.json is the file to drop into openkogama/data
+      - run: python webgl.py --merge shards/*.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: versions
+          path: out/versions.json
