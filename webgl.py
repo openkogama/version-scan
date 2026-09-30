@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
-from ingest import find_version, merge, package, unity_version, upload
+from ingest import find_version, package, unity_version, upload
 from scan import prefab_version, unpack_bundle
 
 S3 = "https://s3.eu-west-1.amazonaws.com/webgl.kogstatic.com/"
@@ -163,13 +163,17 @@ def main():
     p.add_argument("--shards", type=int, default=1)
     p.add_argument("--limit", type=int, default=0)
     p.add_argument("--upload", action="store_true", help="push zips to R2 (needs R2_* env)")
-    p.add_argument("--merge", nargs="*", metavar="SHARD", help="fold shard results into versions.json")
+    p.add_argument("--merge", nargs="*", metavar="SHARD", help="write webgl.json from shard results")
     args = p.parse_args()
     os.makedirs(args.out, exist_ok=True)
 
     if args.merge is not None:
         entries = [e for f in args.merge for e in json.load(open(f, encoding="utf-8"))]
-        merge(entries, os.path.join(args.out, "versions.json"))
+        entries.sort(key=lambda e: e["timestamp"], reverse=True)
+        with open(os.path.join(args.out, "webgl.json"), "w", encoding="utf-8") as f:
+            json.dump({"schema": 2, "versions": entries}, f, indent=4)
+            f.write("\n")
+        print(f"{len(entries)} entries")
         return
 
     sources = json.load(open("webgl-sources.json", encoding="utf-8"))[args.shard :: args.shards]

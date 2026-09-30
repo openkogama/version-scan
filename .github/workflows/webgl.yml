@@ -54,9 +54,9 @@ jobs:
           path: shards
           pattern: webgl-*
           merge-multiple: true
-      # versions.json is the file to drop into openkogama/data
+      # webgl.json is the file to drop into openkogama/data
       - run: python webgl.py --merge shards/*.json
       - uses: actions/upload-artifact@v4
         with:
-          name: versions
-          path: out/versions.json
+          name: webgl
+          path: out/webgl.json
