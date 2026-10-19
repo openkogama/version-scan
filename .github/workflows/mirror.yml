@@ -8,6 +8,7 @@ env:
 
 jobs:
   mirror:
+    environment: r2
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

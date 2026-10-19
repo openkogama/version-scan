@@ -17,6 +17,7 @@ env:
 
 jobs:
   package:
+    environment: r2
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
