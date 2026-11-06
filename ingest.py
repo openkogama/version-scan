@@ -315,9 +315,9 @@ def read_node(r):
 
 
 def parse_assets(b):
-    """Parse a serialized file far enough to reach its objects. v8/v9 only:
-    those are the versions that still ship a type tree, which is what makes the
-    field names readable."""
+    """Parse a serialized file far enough to reach its objects. v8/v9 and the
+    v14/v15 of the Unity 5 web player only: those are the versions that still
+    ship a type tree, which is what makes the field names readable."""
     h = Reader(b, 0, le=False)
     meta, size, version, data_off = h.u32(), h.u32(), h.u32(), h.u32()
     if version >= 9:
@@ -326,6 +326,8 @@ def parse_assets(b):
     else:
         h.o = size - meta
         le = h.u8() == 0
+    if version in (14, 15):
+        return parse_assets5(Reader(b, h.o, le), version, data_off)
     if version > 9:
         return None
     r = Reader(b, h.o, le)
@@ -343,6 +345,70 @@ def parse_assets(b):
         r.i16()
         objects.append((path_id, start, sz, type_id))
     return {"b": b, "le": le, "data": data_off, "types": types, "objects": objects}
+
+
+BY_SIZE = {1: "UInt8", 2: "SInt16", 4: "int", 8: "SInt64"}
+COMMON = {427: "m_Name", 490: "m_Script", 840: "string"}
+
+
+def read_blob(r):
+    count, size = r.i32(), r.i32()
+    raw = []
+    for _ in range(count):
+        r.o += 2
+        level, is_array = r.u8(), r.u8()
+        type_off, name_off, byte_size = r.u32(), r.u32(), r.i32()
+        r.i32()
+        flags = r.i32()
+        raw.append((level, is_array, type_off, name_off, byte_size, flags))
+    strings = r.b[r.o : r.o + size]
+    r.o += size
+
+    def text(off):
+        if off & 0x80000000:
+            return COMMON.get(off & 0x7FFFFFFF, f"#{off & 0x7FFFFFFF}")
+        return strings[off : strings.index(b"\0", off)].decode("utf-8", "replace")
+
+    stack, root = [], None
+    for level, is_array, type_off, name_off, byte_size, flags in raw:
+        n = Node()
+        n.type, n.name, n.size, n.flags, n.kids = "Array" if is_array else text(type_off), text(name_off), byte_size, flags, []
+        del stack[level:]
+        if stack:
+            stack[-1].kids.append(n)
+        else:
+            root = n
+        stack.append(n)
+
+    def typed(n):
+        if not n.kids and n.type not in PRIMITIVES:
+            n.type = BY_SIZE.get(n.size, n.type)
+        for k in n.kids:
+            typed(k)
+
+    typed(root)
+    return root
+
+
+def parse_assets5(r, version, data_off):
+    r.cstr()
+    r.i32()
+    if r.u8() == 0:
+        return None
+    types = {}
+    for _ in range(r.i32()):
+        class_id = r.i32()
+        r.o += 32 if class_id < 0 else 16
+        types[class_id] = read_blob(r)
+    objects = []
+    for _ in range(r.i32()):
+        r.align()
+        path_id = struct.unpack_from(r.f + "q", r.b, r.o)[0]
+        r.o += 8
+        start, sz, type_id = r.u32(), r.u32(), r.i32()
+        r.o += 5 if version == 15 else 4
+        objects.append((path_id, start, sz, type_id))
+    return {"b": r.b, "le": r.f == "<", "data": data_off, "types": types, "objects": objects}
 
 
 PRIMITIVES = {
@@ -405,6 +471,29 @@ def typetree_version(data):
     return None
 
 
+def text_version(data):
+    a = parse_assets(data)
+    if not a:
+        return None
+    objects = {path_id: (start, obj_type) for path_id, start, _, obj_type in a["objects"]}
+    for type_id, root in a["types"].items():
+        if not {"versionText", "versionBuild"} <= {k.name for k in root.kids}:
+            continue
+        for path_id, (start, obj_type) in objects.items():
+            if obj_type != type_id:
+                continue
+            ref = read_value(Reader(a["b"], a["data"] + start, a["le"]), root)["versionText"]
+            if ref.get("m_FileID") != 0 or ref.get("m_PathID") not in objects:
+                return None
+            start, text_type = objects[ref["m_PathID"]]
+            text = read_value(Reader(a["b"], a["data"] + start, a["le"]), a["types"][text_type]).get("m_Script", "").strip()
+            if not text.isdigit():
+                return None
+            n = int(text)
+            return f"{n // 100000}.{n // 1000 % 100}.{n % 1000}"
+    return None
+
+
 def prefab_version(data):
     """scan.py's method: four ints anchored by a trailing build guid."""
     for m in PREFAB.finditer(data):
@@ -419,7 +508,7 @@ def find_version(files):
         data = next((v for k, v in files.items() if k == name or k.endswith("/" + name)), None)
         if data is None:
             continue
-        for reader in (typetree_version, prefab_version):
+        for reader in (typetree_version, text_version, prefab_version):
             try:
                 found = reader(data)
             except Exception:
