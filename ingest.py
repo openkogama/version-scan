@@ -22,6 +22,7 @@ import shutil
 import struct
 import subprocess
 import tempfile
+import time
 import urllib.request
 import uuid
 import zipfile
@@ -61,8 +62,7 @@ WEBPLAYER = [
 ]
 
 # 2015-2018 web-player bundles that only web archives kept. They need the
-# Unity 5 web player, which the launcher does not ship yet, so they are
-# uploaded but held out of versions.json. md5 is the S3 ETag where known.
+# Unity 5 web player. md5 is the S3 ETag where an archive kept the headers.
 WEBPLAYER5 = [
     ("c0ccaf78-4da4-42b2-4d58-98a94a881985", ARQUIVO + "20150409175128id_/http://game-static.kogstatic.com/c0ccaf78-4da4-42b2-4d58-98a94a881985.bin", "ec901c04de69640610d956c587b231c5"),
     ("eca5d205-a3c9-4e9a-5993-bc3260c215fd", WAYBACK + "20151029130537id_/http://game-static.kogstatic.com/eca5d205-a3c9-4e9a-5993-bc3260c215fd.bin", None),
@@ -146,7 +146,6 @@ SOURCES = [
         "name": key + ".unityweb",
         "kind": "bundle",
         "id": key,
-        "hold": True,
         "urls": [url],
         **({"md5": md5} if md5 else {}),
     }
@@ -169,7 +168,7 @@ VERSION_FIELDS = ("versionMajor", "versionMinor", "versionMicro", "versionBuild"
 
 
 def fetch(url, path):
-    for attempt in range(3):
+    for attempt in range(5):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "version-scan"})
             md5 = hashlib.md5()
@@ -183,6 +182,7 @@ def fetch(url, path):
         except Exception as e:
             err = e
             print(f"  retry {attempt + 1}: {e}", flush=True)
+            time.sleep(30 * (attempt + 1))
     raise RuntimeError(err)
 
 
@@ -507,7 +507,7 @@ def keep(path, out_dir):
     return digest, os.path.getsize(dest), dest
 
 
-def upload(entries, zips):
+def client():
     import boto3
 
     s3 = boto3.client(
@@ -518,6 +518,11 @@ def upload(entries, zips):
         region_name="auto",
     )
     s3.head_bucket(Bucket=BUCKET)
+    return s3
+
+
+def upload(entries, zips):
+    s3 = client()
     for entry in entries:
         key = PREFIX + entry["sha256"] + ".zip"
         try:
@@ -534,6 +539,12 @@ def upload(entries, zips):
                 )
             print(f"  {entry['version'] or entry['id']} uploaded", flush=True)
         entry["urls"] = [CDN + key] + [u for u in entry["urls"] if u != CDN + key]
+
+
+def publish(path):
+    with open(path, "rb") as f:
+        client().put_object(Bucket=BUCKET, Key="versions.json", Body=f, ContentType="application/json")
+    print("versions.json published", flush=True)
 
 
 def merge(entries, dest):
@@ -553,14 +564,14 @@ def merge(entries, dest):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--out", default="out", help="where entries and zips are written")
-    p.add_argument("--upload", action="store_true", help="push zips to R2 (needs R2_* env)")
+    p.add_argument("--upload", action="store_true", help="push zips, and with --merge versions.json, to R2 (needs R2_* env)")
     p.add_argument("--keep-zips", action="store_true", help="do not delete zips after the run")
     p.add_argument("--limit", type=int, default=0, help="only the first N sources, for a smoke test")
     p.add_argument("--merge", action="store_true", help="write versions.json with these entries folded in")
     args = p.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
-    entries, zips, failed, held = [], {}, [], set()
+    entries, zips, failed = [], {}, []
 
     sources = SOURCES[: args.limit] if args.limit else SOURCES
     for i, source in enumerate(sources, 1):
@@ -606,8 +617,6 @@ def main():
                     os.path.getsize(f) for f, _ in members
                 )
 
-            if source.get("hold"):
-                held.add(zip_sha)
             entries.append(
                 {
                     "id": source.get("id") or str(uuid.uuid5(uuid.NAMESPACE_OID, zip_sha)),
@@ -645,7 +654,9 @@ def main():
             os.unlink(path)
 
     if args.merge:
-        merge([e for e in entries if e["sha256"] not in held], os.path.join(args.out, "versions.json"))
+        merge(entries, os.path.join(args.out, "versions.json"))
+        if args.upload:
+            publish(os.path.join(args.out, "versions.json"))
 
     versioned = sum(1 for e in entries if e["version"])
     print(f"{len(entries)} packages, {versioned} with a version, {len(entries) - versioned} without, {len(failed)} failed")
