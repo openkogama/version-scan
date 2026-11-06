@@ -145,6 +145,7 @@ SOURCES = [
     {
         "name": key + ".unityweb",
         "kind": "bundle",
+        "group": "webplayer5",
         "id": key,
         "urls": [url],
         **({"md5": md5} if md5 else {}),
@@ -154,11 +155,13 @@ SOURCES = [
     {
         "name": key + ".zip",
         "kind": "zip",
+        "group": "standalone",
         "id": key,
         "urls": [url],
     }
     for key, url in STANDALONE
 ]
+GROUPS = ("legacy", "webplayer5", "standalone")
 
 PREFAB = re.compile(
     rb"(?s)(.{4})(.{4})(.{4})(.{4})\x24\x00\x00\x00[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
@@ -564,16 +567,22 @@ def merge(entries, dest):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--out", default="out", help="where entries and zips are written")
-    p.add_argument("--upload", action="store_true", help="push zips, and with --merge versions.json, to R2 (needs R2_* env)")
+    p.add_argument("--upload", action="store_true", help="push zips to R2 (needs R2_* env)")
+    p.add_argument("--publish", action="store_true", help="with --merge, put versions.json on the cdn (needs R2_* env)")
     p.add_argument("--keep-zips", action="store_true", help="do not delete zips after the run")
     p.add_argument("--limit", type=int, default=0, help="only the first N sources, for a smoke test")
+    p.add_argument("--only", default="", help="comma separated source groups (" + ", ".join(GROUPS) + "), none for no sources")
     p.add_argument("--merge", action="store_true", help="write versions.json with these entries folded in")
     args = p.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
     entries, zips, failed = [], {}, []
 
-    sources = SOURCES[: args.limit] if args.limit else SOURCES
+    wanted = {g.strip() for g in args.only.split(",") if g.strip()}
+    if wanted - set(GROUPS) - {"none"}:
+        p.error(f"unknown groups: {', '.join(sorted(wanted - set(GROUPS) - {'none'}))}")
+    sources = [s for s in SOURCES if not wanted or s.get("group", "legacy") in wanted]
+    sources = sources[: args.limit] if args.limit else sources
     for i, source in enumerate(sources, 1):
         print(f"[{i}/{len(sources)}] {source['name']}", flush=True)
         fd, raw = tempfile.mkstemp()
@@ -655,7 +664,7 @@ def main():
 
     if args.merge:
         merge(entries, os.path.join(args.out, "versions.json"))
-        if args.upload:
+        if args.publish:
             publish(os.path.join(args.out, "versions.json"))
 
     versioned = sum(1 for e in entries if e["version"])

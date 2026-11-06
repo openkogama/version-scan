@@ -7,6 +7,14 @@ on:
         description: "push the packages to r2 (uncheck for a dry run)"
         type: boolean
         default: true
+      publish:
+        description: "put the merged versions.json on the cdn"
+        type: boolean
+        default: false
+      only:
+        description: "source groups: legacy, webplayer5, standalone (empty = all, none = no sources)"
+        type: string
+        default: ""
       limit:
         description: "only the first N sources (0 = all)"
         type: string
@@ -30,11 +38,14 @@ jobs:
       - env:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          ONLY: ${{ inputs.only }}
         run: |
           python ingest.py \
             --limit ${{ inputs.limit }} \
+            --only "$ONLY" \
             --merge \
-            ${{ inputs.upload && '--upload' || '' }}
+            ${{ inputs.upload && '--upload' || '' }} \
+            ${{ inputs.publish && '--publish' || '' }}
       # versions.json is the file to drop into openkogama/data
       - uses: actions/upload-artifact@v4
         with:
